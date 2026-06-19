@@ -1,0 +1,38 @@
+[package]
+name = "beuler"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87" # required only by the optional `gpu` feature (wgpu 29 MSRV); the CPU core builds on older toolchains
+license = "MIT OR Apache-2.0"
+description = "Memory-efficient backward Euler ODE solver with a pluggable CPU (rayon) / GPU (wgpu) backend"
+repository = "https://github.com/YOUR_USERNAME/beuler"
+readme = "README.md"
+keywords = ["ode", "stiff", "backward-euler", "numerical", "gpu"]
+categories = ["mathematics", "science"]
+
+[dependencies]
+# CPU backend: data-parallel BLAS-1 kernels.
+rayon = "1.10"
+
+# GPU backend (experimental, f32). Pulled in only with `--features gpu`.
+wgpu = { version = "29", optional = true }
+pollster = { version = "0.4", optional = true } # block_on for device setup
+bytemuck = { version = "1", features = ["derive"], optional = true }
+
+[features]
+default = []
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# Examples that need the GPU feature declare it here so `cargo run --example` is explicit.
+[[example]]
+name = "decay"
+
+[[example]]
+name = "heat1d"
+
+[[example]]
+name = "auto_backend"
