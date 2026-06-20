@@ -192,7 +192,7 @@ impl GpuBackend {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind, &[]);
-            let groups = (params.n + 63) / 64;
+            let groups = params.n.div_ceil(64);
             pass.dispatch_workgroups(groups, 1, 1);
         }
         self.queue.submit(Some(enc.finish()));
@@ -397,6 +397,12 @@ pub enum Expr {
     Sqrt(Box<Expr>),
     Abs(Box<Expr>),
     Pow(Box<Expr>, Box<Expr>),
+    /// Element `idx` of a read-only parameter buffer at position `i`.
+    /// Populated via [`GpuEquation::build_with_params`].
+    ParamAt(u32),
+    /// Conditional: `then_val` when `cond` is true, `else_val` otherwise.
+    /// Maps to WGSL `select(else_val, then_val, cond)`.
+    Select(Box<BoolExpr>, Box<Expr>, Box<Expr>),
 }
 
 impl From<f32> for Expr {
@@ -482,6 +488,10 @@ pub fn abs(x: Expr) -> Expr {
 pub fn pow(base: Expr, e: Expr) -> Expr {
     Expr::Pow(Box::new(base), Box::new(e))
 }
+/// WGSL `select(else_val, then_val, cond)` — returns `then_val` when `cond` is true.
+pub fn select(cond: BoolExpr, then_val: Expr, else_val: Expr) -> Expr {
+    Expr::Select(Box::new(cond), Box::new(then_val), Box::new(else_val))
+}
 
 // ── StateRef ──────────────────────────────────────────────────────────────
 
@@ -501,6 +511,11 @@ impl StateRef {
     pub fn t(&self) -> Expr {
         Expr::Time
     }
+    /// Element `idx` of extra parameter buffer at position `i`.
+    /// Use with [`GpuEquation::build_with_params`].
+    pub fn param(&self, idx: u32) -> Expr {
+        Expr::ParamAt(idx)
+    }
 }
 
 // ── BoundaryCondition ────────────────────────────────────────────────────
@@ -516,6 +531,52 @@ pub enum BoundaryCondition {
 impl Default for BoundaryCondition {
     fn default() -> Self {
         BoundaryCondition::Dirichlet(0.0)
+    }
+}
+
+// ── BoolExpr ─────────────────────────────────────────────────────────────
+
+/// Boolean predicate for use in [`select`] conditional expressions.
+///
+/// All predicates are over the per-thread index `i`.
+#[derive(Clone, Debug)]
+pub enum BoolExpr {
+    /// `i < val`
+    IndexLt(u32),
+    /// `i <= val`
+    IndexLe(u32),
+    /// `i > val`
+    IndexGt(u32),
+    /// `i >= val`
+    IndexGe(u32),
+    /// Logical AND of two predicates.
+    And(Box<BoolExpr>, Box<BoolExpr>),
+    /// Logical OR of two predicates.
+    Or(Box<BoolExpr>, Box<BoolExpr>),
+    /// Logical NOT of a predicate.
+    Not(Box<BoolExpr>),
+}
+
+impl BoolExpr {
+    /// `lo <= i < hi` — the most common range check.
+    pub fn range(lo: u32, hi: u32) -> Self {
+        BoolExpr::And(
+            Box::new(BoolExpr::IndexGe(lo)),
+            Box::new(BoolExpr::IndexLt(hi)),
+        )
+    }
+    pub fn and(self, rhs: BoolExpr) -> Self {
+        BoolExpr::And(Box::new(self), Box::new(rhs))
+    }
+    pub fn or(self, rhs: BoolExpr) -> Self {
+        BoolExpr::Or(Box::new(self), Box::new(rhs))
+    }
+}
+
+impl std::ops::Not for BoolExpr {
+    type Output = BoolExpr;
+    fn not(self) -> BoolExpr {
+        BoolExpr::Not(Box::new(self))
     }
 }
 
@@ -549,7 +610,7 @@ fn collect_offsets(expr: &Expr, out: &mut std::collections::BTreeSet<i32>) {
         Expr::StateAt(k) => {
             out.insert(*k);
         }
-        Expr::Const(_) | Expr::Time | Expr::Index => {}
+        Expr::Const(_) | Expr::Time | Expr::Index | Expr::ParamAt(_) => {}
         Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b) | Expr::Div(a, b) | Expr::Pow(a, b) => {
             collect_offsets(a, out);
             collect_offsets(b, out);
@@ -561,6 +622,46 @@ fn collect_offsets(expr: &Expr, out: &mut std::collections::BTreeSet<i32>) {
         | Expr::Ln(a)
         | Expr::Sqrt(a)
         | Expr::Abs(a) => collect_offsets(a, out),
+        Expr::Select(_, then_val, else_val) => {
+            collect_offsets(then_val, out);
+            collect_offsets(else_val, out);
+        }
+    }
+}
+
+fn collect_param_indices(expr: &Expr, out: &mut std::collections::BTreeSet<u32>) {
+    match expr {
+        Expr::ParamAt(idx) => {
+            out.insert(*idx);
+        }
+        Expr::Const(_) | Expr::Time | Expr::Index | Expr::StateAt(_) => {}
+        Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b) | Expr::Div(a, b) | Expr::Pow(a, b) => {
+            collect_param_indices(a, out);
+            collect_param_indices(b, out);
+        }
+        Expr::Neg(a)
+        | Expr::Sin(a)
+        | Expr::Cos(a)
+        | Expr::Exp(a)
+        | Expr::Ln(a)
+        | Expr::Sqrt(a)
+        | Expr::Abs(a) => collect_param_indices(a, out),
+        Expr::Select(_, then_val, else_val) => {
+            collect_param_indices(then_val, out);
+            collect_param_indices(else_val, out);
+        }
+    }
+}
+
+pub fn bool_to_wgsl(b: &BoolExpr) -> String {
+    match b {
+        BoolExpr::IndexLt(v) => format!("(i < {v}u)"),
+        BoolExpr::IndexLe(v) => format!("(i <= {v}u)"),
+        BoolExpr::IndexGt(v) => format!("(i > {v}u)"),
+        BoolExpr::IndexGe(v) => format!("(i >= {v}u)"),
+        BoolExpr::And(a, b) => format!("({} && {})", bool_to_wgsl(a), bool_to_wgsl(b)),
+        BoolExpr::Or(a, b) => format!("({} || {})", bool_to_wgsl(a), bool_to_wgsl(b)),
+        BoolExpr::Not(a) => format!("(!{})", bool_to_wgsl(a)),
     }
 }
 
@@ -582,6 +683,14 @@ fn expr_to_wgsl(expr: &Expr) -> String {
         Expr::Sqrt(a) => format!("sqrt({})", expr_to_wgsl(a)),
         Expr::Abs(a) => format!("abs({})", expr_to_wgsl(a)),
         Expr::Pow(b, e) => format!("pow({}, {})", expr_to_wgsl(b), expr_to_wgsl(e)),
+        Expr::ParamAt(idx) => format!("_pb{idx}[i]"),
+        // WGSL select(false_val, true_val, cond)
+        Expr::Select(cond, then_val, else_val) => format!(
+            "select({}, {}, {})",
+            expr_to_wgsl(else_val),
+            expr_to_wgsl(then_val),
+            bool_to_wgsl(cond)
+        ),
     }
 }
 
@@ -591,9 +700,13 @@ fn expr_to_wgsl(expr: &Expr) -> String {
 /// - binding 0: uniform `EvalParams { n: u32, t: f32, … }`
 /// - binding 1: read-only `array<f32>` (input `y`)
 /// - binding 2: read-write `array<f32>` (output)
+/// - binding 3+: read-only `array<f32>` for each `ParamAt(idx)` used (at binding `3 + idx`)
 pub fn generate_eval_wgsl(expr: &Expr, boundary: &BoundaryCondition) -> String {
     let mut offsets = std::collections::BTreeSet::new();
     collect_offsets(expr, &mut offsets);
+
+    let mut param_indices = std::collections::BTreeSet::new();
+    collect_param_indices(expr, &mut param_indices);
 
     let mut prelude = String::new();
     for &k in &offsets {
@@ -626,13 +739,22 @@ pub fn generate_eval_wgsl(expr: &Expr, boundary: &BoundaryCondition) -> String {
         prelude.push_str(&line);
     }
 
+    // Emit one storage binding per used ParamAt index (binding 3, 4, …).
+    let mut param_decls = String::new();
+    for &idx in &param_indices {
+        let binding = 3 + idx;
+        param_decls.push_str(&format!(
+            "@group(0) @binding({binding}) var<storage, read> _pb{idx}: array<f32>;\n"
+        ));
+    }
+
     let body = expr_to_wgsl(expr);
     format!(
         r#"struct EvalParams {{ n: u32, t: f32, _p0: u32, _p1: u32 }}
 @group(0) @binding(0) var<uniform>             p:   EvalParams;
 @group(0) @binding(1) var<storage, read>       y:   array<f32>;
 @group(0) @binding(2) var<storage, read_write> out: array<f32>;
-
+{param_decls}
 @compute @workgroup_size(64)
 fn eval_main(@builtin(global_invocation_id) gid: vec3<u32>) {{
     let i = gid.x;
@@ -669,6 +791,8 @@ pub struct GpuEquation {
     eval_pipeline: wgpu::ComputePipeline,
     eval_layout: wgpu::BindGroupLayout,
     params_buf: wgpu::Buffer,
+    /// Extra parameter buffers: `(binding_number, buffer)` pairs sorted by binding.
+    param_bufs: Vec<(u32, wgpu::Buffer)>,
     n: usize,
 }
 
@@ -678,6 +802,43 @@ impl GpuEquation {
     /// # Panics
     /// Panics if wgpu rejects the generated WGSL.
     pub fn build<F>(backend: &GpuBackend, n: usize, boundary: BoundaryCondition, f: F) -> Self
+    where
+        F: Fn(&StateRef) -> Expr,
+    {
+        Self::build_inner(backend, n, boundary, f, &[])
+    }
+
+    /// Like [`build`](Self::build) but also uploads per-element parameter slices.
+    ///
+    /// `params[i]` becomes accessible as `x.param(i as u32)` in the closure.
+    /// The slice at index `i` must have length `n` (it is uploaded to GPU
+    /// storage binding `3 + i`).
+    ///
+    /// # Panics
+    /// Panics if wgpu rejects the generated WGSL or if any slice length ≠ `n`.
+    pub fn build_with_params<F>(
+        backend: &GpuBackend,
+        n: usize,
+        boundary: BoundaryCondition,
+        params: &[&[f32]],
+        f: F,
+    ) -> Self
+    where
+        F: Fn(&StateRef) -> Expr,
+    {
+        for (i, p) in params.iter().enumerate() {
+            assert_eq!(p.len(), n, "params[{i}] has length {} but n = {n}", p.len());
+        }
+        Self::build_inner(backend, n, boundary, f, params)
+    }
+
+    fn build_inner<F>(
+        backend: &GpuBackend,
+        n: usize,
+        boundary: BoundaryCondition,
+        f: F,
+        extra_params: &[&[f32]],
+    ) -> Self
     where
         F: Fn(&StateRef) -> Expr,
     {
@@ -691,16 +852,28 @@ impl GpuEquation {
                 source: wgpu::ShaderSource::Wgsl(Cow::Owned(wgsl)),
             });
 
+        // Build BGL: binding 0 uniform, 1 y read, 2 out write, then one per param.
+        let mut bgl_entries = vec![
+            bgl_entry(0, wgpu::BufferBindingType::Uniform),
+            bgl_entry(1, wgpu::BufferBindingType::Storage { read_only: true }),
+            bgl_entry(2, wgpu::BufferBindingType::Storage { read_only: false }),
+        ];
+        // Collect which param indices appear in the expression (sparse).
+        let mut used_param_indices = std::collections::BTreeSet::new();
+        collect_param_indices(&expr, &mut used_param_indices);
+        for &idx in &used_param_indices {
+            bgl_entries.push(bgl_entry(
+                3 + idx,
+                wgpu::BufferBindingType::Storage { read_only: true },
+            ));
+        }
+
         let eval_layout =
             backend
                 .device
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("beuler-eval-bgl"),
-                    entries: &[
-                        bgl_entry(0, wgpu::BufferBindingType::Uniform),
-                        bgl_entry(1, wgpu::BufferBindingType::Storage { read_only: true }),
-                        bgl_entry(2, wgpu::BufferBindingType::Storage { read_only: false }),
-                    ],
+                    entries: &bgl_entries,
                 });
 
         let pipeline_layout =
@@ -740,10 +913,27 @@ impl GpuEquation {
             .queue
             .write_buffer(&params_buf, 0, bytemuck::bytes_of(&init));
 
+        // Upload extra parameter slices into STORAGE buffers.
+        let param_bufs: Vec<(u32, wgpu::Buffer)> = used_param_indices
+            .iter()
+            .map(|&idx| {
+                let data = extra_params.get(idx as usize).copied().unwrap_or(&[]);
+                let buf = backend
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("beuler-param-buf"),
+                        contents: bytemuck::cast_slice(data),
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    });
+                (3 + idx, buf)
+            })
+            .collect();
+
         Self {
             eval_pipeline,
             eval_layout,
             params_buf,
+            param_bufs,
             n,
         }
     }
@@ -761,25 +951,33 @@ impl crate::problem::OdeProblem<GpuBackend> for GpuEquation {
             .queue
             .write_buffer(&self.params_buf, 4, bytemuck::bytes_of(&t_f32));
 
+        let mut entries = vec![
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: self.params_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: y.buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: out.buffer.as_entire_binding(),
+            },
+        ];
+        for (binding, buf) in &self.param_bufs {
+            entries.push(wgpu::BindGroupEntry {
+                binding: *binding,
+                resource: buf.as_entire_binding(),
+            });
+        }
+
         let bind = backend
             .device
             .create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("beuler-eval-bind"),
                 layout: &self.eval_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.params_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: y.buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: out.buffer.as_entire_binding(),
-                    },
-                ],
+                entries: &entries,
             });
 
         let mut enc = backend
@@ -792,7 +990,7 @@ impl crate::problem::OdeProblem<GpuBackend> for GpuEquation {
             });
             pass.set_pipeline(&self.eval_pipeline);
             pass.set_bind_group(0, &bind, &[]);
-            pass.dispatch_workgroups((self.n as u32 + 63) / 64, 1, 1);
+            pass.dispatch_workgroups((self.n as u32).div_ceil(64), 1, 1);
         }
         backend.queue.submit(Some(enc.finish()));
     }
@@ -862,6 +1060,70 @@ mod tests {
         let wgsl = generate_eval_wgsl(&expr, &BoundaryCondition::Dirichlet(0.0));
         assert!(wgsl.contains("select("), "select in dirichlet BC");
         assert!(!wgsl.contains("% p.n"), "no modulo in dirichlet BC");
+    }
+
+    #[test]
+    fn wgsl_param_at() {
+        let x = StateRef;
+        let expr = x.param(0) * x.at(0);
+        let wgsl = generate_eval_wgsl(&expr, &BoundaryCondition::Dirichlet(0.0));
+        assert!(wgsl.contains("_pb0[i]"), "param buffer 0 in body");
+        assert!(wgsl.contains("@binding(3)"), "param binding 3 in header");
+        assert!(wgsl.contains("_pb0: array<f32>"), "param buffer decl");
+    }
+
+    #[test]
+    fn wgsl_param_at_multiple() {
+        let x = StateRef;
+        let expr = x.param(0) + x.param(2);
+        let wgsl = generate_eval_wgsl(&expr, &BoundaryCondition::default());
+        assert!(wgsl.contains("@binding(3)"), "binding 3 for param 0");
+        assert!(wgsl.contains("@binding(5)"), "binding 5 for param 2");
+        assert!(
+            !wgsl.contains("@binding(4)"),
+            "param 1 not used → no binding 4"
+        );
+    }
+
+    #[test]
+    fn wgsl_select_range() {
+        let x = StateRef;
+        let expr = select(
+            BoolExpr::range(20, 30),
+            x.at(0) * x.at(0),
+            Expr::from(0.0_f32),
+        );
+        let wgsl = generate_eval_wgsl(&expr, &BoundaryCondition::default());
+        assert!(wgsl.contains("select("), "select keyword in body");
+        assert!(wgsl.contains("i >= 20u"), "lower bound");
+        assert!(wgsl.contains("i < 30u"), "upper bound");
+        assert!(wgsl.contains("&&"), "and operator");
+    }
+
+    #[test]
+    fn wgsl_select_combined() {
+        let x = StateRef;
+        let diffusion = Expr::from(0.1_f32) * (x.at(-1) - x.at(0) * 2.0_f32 + x.at(1));
+        let source = select(
+            BoolExpr::range(20, 30),
+            x.param(0) * x.at(0),
+            Expr::from(0.0_f32),
+        );
+        let expr = diffusion + source;
+        let wgsl = generate_eval_wgsl(&expr, &BoundaryCondition::Dirichlet(0.0));
+        assert!(wgsl.contains("_pb0[i]"), "param in select branch");
+        assert!(wgsl.contains("select("), "select in body");
+        assert!(wgsl.contains("@binding(3)"), "param binding");
+    }
+
+    #[test]
+    fn bool_expr_ops() {
+        let b = !BoolExpr::IndexLt(10).and(BoolExpr::IndexGe(5));
+        let wgsl = bool_to_wgsl(&b);
+        assert!(wgsl.contains("i < 10u"));
+        assert!(wgsl.contains("i >= 5u"));
+        assert!(wgsl.contains("&&"));
+        assert!(wgsl.starts_with("(!"));
     }
 
     #[test]

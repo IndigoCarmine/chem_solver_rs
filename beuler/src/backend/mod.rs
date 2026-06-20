@@ -28,8 +28,8 @@ pub use gpu::GpuBackend;
 #[cfg(feature = "gpu")]
 pub mod gpu_eq {
     pub use super::gpu::{
-        abs, cos, exp, generate_eval_wgsl, ln, pow, sin, sqrt, BoundaryCondition, Expr,
-        GpuEquation, StateRef,
+        abs, bool_to_wgsl, cos, exp, generate_eval_wgsl, ln, pow, select, sin, sqrt, BoolExpr,
+        BoundaryCondition, Expr, GpuEquation, StateRef,
     };
 }
 
