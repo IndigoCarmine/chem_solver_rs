@@ -46,6 +46,8 @@ pub mod problem;
 pub mod stepper;
 
 #[cfg(feature = "gpu")]
+pub use backend::gpu_eq;
+#[cfg(feature = "gpu")]
 pub use backend::GpuBackend;
 pub use backend::{recommend_backend, Backend, BackendKind, CpuBackend};
 

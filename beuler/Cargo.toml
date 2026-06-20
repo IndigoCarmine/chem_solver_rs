@@ -36,3 +36,7 @@ name = "heat1d"
 
 [[example]]
 name = "auto_backend"
+
+[[example]]
+name = "gpu_heat1d"
+required-features = ["gpu"]

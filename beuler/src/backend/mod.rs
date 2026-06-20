@@ -21,6 +21,18 @@ mod gpu;
 #[cfg(feature = "gpu")]
 pub use gpu::GpuBackend;
 
+/// GPU expression DSL types and helpers, gated on the `gpu` feature.
+///
+/// Use [`GpuEquation::build`] to compile an [`Expr`] closure into a WGSL
+/// compute shader that fully runs on the GPU.
+#[cfg(feature = "gpu")]
+pub mod gpu_eq {
+    pub use super::gpu::{
+        abs, cos, exp, generate_eval_wgsl, ln, pow, sin, sqrt, BoundaryCondition, Expr,
+        GpuEquation, StateRef,
+    };
+}
+
 /// A compute backend that owns vectors and implements BLAS-1 kernels.
 ///
 /// All scalars at the API boundary are `f64`. A backend whose device works in
