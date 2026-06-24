@@ -7,11 +7,10 @@
 //! All BLAS-1 operations AND the right-hand side evaluation run on the GPU;
 //! no per-step CPU work is done once the shader is compiled.
 //!
-//! Run: cargo run --example gpu_heat1d --features gpu
-
-use beuler::{
+use chem_solver_rs::{
     gpu_eq::{BoundaryCondition, Expr, GpuEquation},
-    BackwardEuler, GpuBackend,
+    BackwardEuler, GpuBackend, NewtonParams,
+    visualize::TrajectoryPlayer,
 };
 
 fn main() {
@@ -30,6 +29,8 @@ fn main() {
         c * (x.at(-1) - x.at(0) * 2.0_f32 + x.at(1))
     });
 
+    // println!(generate_eval_wgsl(&problem, BoundaryCondition::Dirichlet(0.0)).unwrap());
+
     // Initial condition u(x, 0) = sin(pi * x)
     let y0: Vec<f64> = (0..n)
         .map(|i| {
@@ -38,20 +39,39 @@ fn main() {
         })
         .collect();
 
-    // Step size chosen so that h * coeff ≈ 0.01 (well-conditioned Newton step).
     let h = 1e-6_f64;
-    let n_steps = 100;
+    let n_steps = 10000;
 
-    let stepper = BackwardEuler::new(h);
+    let mut stepper = BackwardEuler::new(h);
+    // GPU backend works in f32 (~7 significant digits). The Newton residual
+    // cannot converge below ~1e-6 for a 1000-element f32 system, so we relax
+    // the tolerance to match f32 precision.
+    stepper.newton = NewtonParams {
+        tol: 1e-5,
+        ..NewtonParams::default()
+    };
+
     let traj = stepper
         .integrate(&backend, &problem, 0.0, &y0, n_steps)
-        .unwrap();
+        .expect("integration failed");
 
     let (t_end, y_end) = traj.last().unwrap();
     let max_u = y_end.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-
-    // Exact: max of sin(pi*x) = 1, decayed by exp(-alpha * pi^2 * t).
     let exact_max = (-alpha * std::f64::consts::PI.powi(2) * t_end).exp();
 
     println!("t = {t_end:.6}  max|u| = {max_u:.6}  (exact {exact_max:.6})");
+
+    // ── Animated GUI (only when compiled with --features visualize) ──────────
+
+    // Physical x-coordinates for the interior grid points.
+    let xs: Vec<f64> = (0..n).map(|i| (i as f64 + 1.0) * dx).collect();
+
+    TrajectoryPlayer::new(traj)
+        .with_title("GPU Heat Equation — 1-D")
+        .with_x_values(xs)
+        .with_labels("x", "u(x, t)")
+        .with_fps(30.0)
+        .play()
+        .expect("GUI error");
+    
 }

@@ -1,5 +1,5 @@
 [package]
-name = "beuler"
+name = "chem-solver-rs"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.87" # required only by the optional `gpu` feature (wgpu 29 MSRV); the CPU core builds on older toolchains
@@ -15,13 +15,13 @@ categories = ["mathematics", "science"]
 rayon = "1.10"
 
 # GPU backend (experimental, f32). Pulled in only with `--features gpu`.
-wgpu = { version = "29", optional = true }
-pollster = { version = "0.4", optional = true } # block_on for device setup
-bytemuck = { version = "1", features = ["derive"], optional = true }
+wgpu = "29"
+pollster =  "0.4"
+bytemuck =  "1"
+# GUI / visualizer (animated trajectory player). Enable with `--features visualize`.
+eframe =  "0.32.3"
+egui_plot = "0.33.0"
 
-[features]
-default = []
-gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 
 [profile.release]
 lto = "thin"
@@ -39,4 +39,10 @@ name = "auto_backend"
 
 [[example]]
 name = "gpu_heat1d"
-required-features = ["gpu"]
+
+[[example]]
+name = "forced_chain"
+
+[[example]]
+name = "chain_reaction"
+

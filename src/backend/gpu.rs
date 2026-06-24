@@ -403,6 +403,10 @@ pub enum Expr {
     /// Conditional: `then_val` when `cond` is true, `else_val` otherwise.
     /// Maps to WGSL `select(else_val, then_val, cond)`.
     Select(Box<BoolExpr>, Box<Expr>, Box<Expr>),
+    /// Absolute element access: `y[abs_index]` regardless of the current
+    /// thread index `i`.  Useful when one fixed grid point (e.g. the "x₁"
+    /// species) appears as a nonlinear factor for every thread.
+    StateAbsAt(u32),
 }
 
 impl From<f32> for Expr {
@@ -516,6 +520,13 @@ impl StateRef {
     pub fn param(&self, idx: u32) -> Expr {
         Expr::ParamAt(idx)
     }
+    /// `y[abs_index]` — reads a **fixed** element of the state vector from
+    /// every thread.  Use this when a specific grid point (e.g. the first
+    /// species `x₁ = y[0]`) appears as a nonlinear factor in the right-hand
+    /// side.
+    pub fn abs_at(&self, abs_index: u32) -> Expr {
+        Expr::StateAbsAt(abs_index)
+    }
 }
 
 // ── BoundaryCondition ────────────────────────────────────────────────────
@@ -610,7 +621,7 @@ fn collect_offsets(expr: &Expr, out: &mut std::collections::BTreeSet<i32>) {
         Expr::StateAt(k) => {
             out.insert(*k);
         }
-        Expr::Const(_) | Expr::Time | Expr::Index | Expr::ParamAt(_) => {}
+        Expr::Const(_) | Expr::Time | Expr::Index | Expr::ParamAt(_) | Expr::StateAbsAt(_) => {}
         Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b) | Expr::Div(a, b) | Expr::Pow(a, b) => {
             collect_offsets(a, out);
             collect_offsets(b, out);
@@ -634,7 +645,7 @@ fn collect_param_indices(expr: &Expr, out: &mut std::collections::BTreeSet<u32>)
         Expr::ParamAt(idx) => {
             out.insert(*idx);
         }
-        Expr::Const(_) | Expr::Time | Expr::Index | Expr::StateAt(_) => {}
+        Expr::Const(_) | Expr::Time | Expr::Index | Expr::StateAt(_) | Expr::StateAbsAt(_) => {}
         Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b) | Expr::Div(a, b) | Expr::Pow(a, b) => {
             collect_param_indices(a, out);
             collect_param_indices(b, out);
@@ -684,6 +695,7 @@ fn expr_to_wgsl(expr: &Expr) -> String {
         Expr::Abs(a) => format!("abs({})", expr_to_wgsl(a)),
         Expr::Pow(b, e) => format!("pow({}, {})", expr_to_wgsl(b), expr_to_wgsl(e)),
         Expr::ParamAt(idx) => format!("_pb{idx}[i]"),
+        Expr::StateAbsAt(idx) => format!("y[{idx}u]"),
         // WGSL select(false_val, true_val, cond)
         Expr::Select(cond, then_val, else_val) => format!(
             "select({}, {}, {})",

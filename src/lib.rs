@@ -1,4 +1,4 @@
-//! # beuler — memory-efficient backward Euler ODE solver
+//! # chem_solver — memory-efficient backward Euler ODE solver
 //!
 //! Solves `dy/dt = f(t, y)` with the **implicit (backward) Euler** method.
 //!
@@ -16,7 +16,7 @@
 //! ## Quick start
 //!
 //! ```rust
-//! use beuler::{BackwardEuler, CpuBackend, OdeProblem, Backend};
+//! use chem_solver::{BackwardEuler, CpuBackend, OdeProblem, Backend};
 //!
 //! struct Decay;
 //! impl OdeProblem<CpuBackend> for Decay {
@@ -44,10 +44,9 @@ pub mod linsolve;
 pub mod newton;
 pub mod problem;
 pub mod stepper;
+pub mod visualize;
 
-#[cfg(feature = "gpu")]
 pub use backend::gpu_eq;
-#[cfg(feature = "gpu")]
 pub use backend::GpuBackend;
 pub use backend::{recommend_backend, Backend, BackendKind, CpuBackend};
 

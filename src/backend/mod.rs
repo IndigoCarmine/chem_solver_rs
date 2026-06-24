@@ -16,16 +16,13 @@
 mod cpu;
 pub use cpu::CpuBackend;
 
-#[cfg(feature = "gpu")]
 mod gpu;
-#[cfg(feature = "gpu")]
 pub use gpu::GpuBackend;
 
 /// GPU expression DSL types and helpers, gated on the `gpu` feature.
 ///
 /// Use [`GpuEquation::build`] to compile an [`Expr`] closure into a WGSL
 /// compute shader that fully runs on the GPU.
-#[cfg(feature = "gpu")]
 pub mod gpu_eq {
     pub use super::gpu::{
         abs, bool_to_wgsl, cos, exp, generate_eval_wgsl, ln, pow, select, sin, sqrt, BoolExpr,
@@ -98,12 +95,9 @@ pub enum BackendKind {
 ///
 /// Without the `gpu` feature this always returns [`BackendKind::Cpu`].
 pub fn recommend_backend(dim: usize) -> BackendKind {
-    #[cfg(feature = "gpu")]
-    {
-        const GPU_MIN_DIM: usize = 50_000;
-        if dim >= GPU_MIN_DIM && gpu::is_available() {
-            return BackendKind::Gpu;
-        }
+    const GPU_MIN_DIM: usize = 50_000;
+    if dim >= GPU_MIN_DIM && gpu::is_available() {
+        return BackendKind::Gpu;
     }
     let _ = dim;
     BackendKind::Cpu
